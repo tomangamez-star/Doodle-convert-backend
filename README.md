@@ -2,6 +2,8 @@
 
 A Render-ready Telegram multi-game hub. It uses inline message buttons, native Telegram game cards, signed play sessions, Telegram game scores, a persistent Supabase leaderboard, profiles, and feedback.
 
+The repository pins Render to Python 3.12.7 through `.python-version`. Keep this file in the repository root; Render's Python 3.14 default can otherwise force `pydantic-core` into an unsupported source build.
+
 ## One-time setup
 
 1. In Supabase SQL Editor, run `supabase/schema.sql`.
