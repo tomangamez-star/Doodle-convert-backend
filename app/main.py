@@ -59,19 +59,59 @@ async def feedback_help(q: CallbackQuery): await edit(q, msg.quote("Feedback\n\n
 async def feedback_command(message: Message):
     text = message.text.partition(" ")[2].strip()
     if not text: return await message.reply(msg.quote("Add your feedback after /feedback."))
-    if db.ready: await db.request("POST", "feedback", json={"telegram_user_id":message.from_user.id,"game_key":"hub","message":text})
-    await message.reply(msg.quote("Feedback saved. Thank you."))
+    delivered = False
+    if settings.owner_id:
+        try:
+            await bot.send_message(settings.owner_id, msg.quote(f"New bot feedback\n\nFrom: {message.from_user.full_name}\nUser ID: {message.from_user.id}\n\n{text}"))
+            delivered = True
+        except Exception:
+            logging.exception("Could not DM feedback to owner")
+    if db.ready:
+        try:
+            await db.request("POST", "feedback", json={"telegram_user_id":message.from_user.id,"game_key":"hub","message":text})
+            delivered = True
+        except Exception:
+            logging.exception("Could not store bot feedback in Supabase")
+    await message.reply(msg.quote("Feedback delivered. Thank you." if delivered else "Feedback could not be delivered. Please try again later."))
+
+@dp.message(Command("feedbacks"))
+async def feedbacks_command(message: Message):
+    if not settings.owner_id or message.from_user.id != settings.owner_id:
+        return await message.reply(msg.quote("This command is only available to the bot owner."))
+    if not db.ready:
+        return await message.reply(msg.quote("Supabase is not configured. New feedback will still arrive here by DM."))
+    try:
+        rows = await db.request("GET", "feedback", params={"select":"telegram_user_id,game_key,message,status,created_at","order":"created_at.desc","limit":"8"})
+    except Exception:
+        logging.exception("Could not load feedback from Supabase")
+        return await message.reply(msg.quote("The Supabase feedback table is missing. Run supabase/schema.sql, then try /feedbacks again."))
+    if not rows:
+        return await message.reply(msg.quote("No stored feedback yet."))
+    lines = []
+    for index, row in enumerate(rows, 1):
+        lines.append(f"{index}. [{row.get('game_key','hub')}] User {row.get('telegram_user_id','?')}\n{str(row.get('message',''))[:400]}\n{row.get('created_at','')}")
+    await message.reply(msg.quote("Latest feedback\n\n" + "\n\n".join(lines)))
 
 @dp.callback_query(F.game_short_name)
 async def launch_game(q: CallbackQuery):
+    if not settings.game_url.startswith("https://"):
+        await q.answer("The game URL is not configured yet.", show_alert=True)
+        logging.error("GAME_BASE_URL is missing or is not HTTPS")
+        return
     user = {"id":q.from_user.id,"username":q.from_user.username,"display_name":q.from_user.full_name}
-    if db.ready: await db.upsert_player(user)
     jti = str(uuid.uuid4())
     claims = {"sub":str(q.from_user.id),"jti":jti,"game_key":"doodle_covert","chat_id":q.message.chat.id if q.message else None,"message_id":q.message.message_id if q.message else None,"inline_message_id":q.inline_message_id,"display_name":q.from_user.full_name}
     token = issue_session(**claims)
-    if db.ready: await db.save_session({"jti":jti,"telegram_user_id":q.from_user.id,"game_key":"doodle_covert","chat_id":claims["chat_id"],"message_id":claims["message_id"],"inline_message_id":claims["inline_message_id"]})
     url = settings.game_url + "?" + urlencode({"session":token,"api":settings.public_url,"player_name":q.from_user.full_name})
+    # Telegram needs the launch URL within seconds. Never make Play wait on
+    # Supabase; persistence is best-effort after the game has already opened.
     await q.answer(url=url)
+    if db.ready:
+        try:
+            await db.upsert_player(user)
+            await db.save_session({"jti":jti,"telegram_user_id":q.from_user.id,"game_key":"doodle_covert","chat_id":claims["chat_id"],"message_id":claims["message_id"],"inline_message_id":claims["inline_message_id"]})
+        except Exception:
+            logging.exception("Game launched, but its session could not be stored in Supabase")
 
 class Score(BaseModel):
     game_key: str
@@ -106,9 +146,21 @@ async def leaderboard(game: str="doodle_covert", limit: int=5): return {"entries
 @app.post("/api/v1/feedback")
 async def feedback(body: Feedback, authorization: str | None = Header(None)):
     claims = claims_from(authorization)
-    await db.request("POST", "feedback", json={"telegram_user_id":int(claims["sub"]),**body.model_dump()})
-    if settings.owner_id: await bot.send_message(settings.owner_id, msg.quote(f"Game feedback from {claims.get('display_name','Agent')}:\n\n{body.message}"))
-    return {"ok":True}
+    delivered = False
+    if settings.owner_id:
+        try:
+            await bot.send_message(settings.owner_id, msg.quote(f"New game feedback\n\nFrom: {claims.get('display_name','Agent')}\nUser ID: {claims['sub']}\nGame: {body.game_key}\n\n{body.message}"))
+            delivered = True
+        except Exception:
+            logging.exception("Could not DM game feedback to owner")
+    if db.ready:
+        try:
+            await db.request("POST", "feedback", json={"telegram_user_id":int(claims["sub"]),**body.model_dump()})
+            delivered = True
+        except Exception:
+            logging.exception("Could not store game feedback in Supabase")
+    if not delivered: raise HTTPException(503, "Feedback delivery is temporarily unavailable")
+    return {"ok":True,"owner_notified":bool(settings.owner_id)}
 @app.get("/health")
 async def health(): return {"ok":True,"database":db.ready}
 @app.post("/telegram/webhook")
