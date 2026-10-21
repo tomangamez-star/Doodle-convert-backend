@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import uuid
 from urllib.parse import urlencode
 from fastapi import FastAPI, Header, HTTPException, Request
@@ -7,6 +8,7 @@ from pydantic import BaseModel, Field
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message, Update
 from .config import settings
@@ -20,8 +22,14 @@ bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.
 dp = Dispatcher()
 
 async def edit(query: CallbackQuery, text: str, markup):
-    await query.message.edit_text(text, reply_markup=markup)
+    # Acknowledge immediately so Telegram never leaves the button spinning,
+    # even when the requested page is already visible.
     await query.answer()
+    try:
+        await query.message.edit_text(text, reply_markup=markup)
+    except TelegramBadRequest as error:
+        if "message is not modified" not in str(error).lower():
+            raise
 
 @dp.message(Command("start", "menu"))
 async def start(message: Message): await message.answer(msg.WELCOME, reply_markup=kb.main_menu())
@@ -35,7 +43,7 @@ async def game_info(q: CallbackQuery): await edit(q, msg.DOODLE, kb.game_details
 @dp.callback_query(F.data == "game:send:doodle_covert")
 async def send_game(q: CallbackQuery):
     await q.answer()
-    await bot.send_game(q.from_user.id, settings.game_short_name, reply_markup=kb.native_game())
+    await bot.send_game(q.message.chat.id, settings.game_short_name, reply_markup=kb.native_game())
 @dp.callback_query(F.data == "menu:settings")
 async def settings_page(q: CallbackQuery): await edit(q, msg.SETTINGS, kb.back_home())
 @dp.callback_query(F.data.in_({"menu:rankings","rank:doodle_covert"}))
@@ -106,7 +114,12 @@ async def health(): return {"ok":True,"database":db.ready}
 @app.post("/telegram/webhook")
 async def webhook(request: Request, x_telegram_bot_api_secret_token: str | None=Header(None)):
     if x_telegram_bot_api_secret_token != settings.webhook_secret: raise HTTPException(403)
-    await dp.feed_update(bot, Update.model_validate(await request.json(), context={"bot":bot}))
+    try:
+        await dp.feed_update(bot, Update.model_validate(await request.json(), context={"bot":bot}))
+    except Exception:
+        # Telegram retries non-2xx webhook responses. Logging and acknowledging
+        # prevents one bad update from blocking every later button press.
+        logging.exception("Telegram update handler failed")
     return {"ok":True}
 @app.on_event("startup")
 async def startup():
