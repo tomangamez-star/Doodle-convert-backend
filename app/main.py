@@ -21,10 +21,11 @@ app.add_middleware(CORSMiddleware, allow_origins=list(settings.allowed_origins),
 bot = Bot(settings.bot_token, default=DefaultBotProperties(parse_mode=ParseMode.HTML)) if settings.bot_token else None
 dp = Dispatcher()
 
-async def edit(query: CallbackQuery, text: str, markup):
+async def edit(query: CallbackQuery, text: str, markup, acknowledge: bool = True):
     # Acknowledge immediately so Telegram never leaves the button spinning,
     # even when the requested page is already visible.
-    await query.answer()
+    if acknowledge:
+        await query.answer()
     try:
         await query.message.edit_text(text, reply_markup=markup)
     except TelegramBadRequest as error:
@@ -48,9 +49,22 @@ async def send_game(q: CallbackQuery):
 async def settings_page(q: CallbackQuery): await edit(q, msg.SETTINGS, kb.back_home())
 @dp.callback_query(F.data.in_({"menu:rankings","rank:doodle_covert"}))
 async def rankings(q: CallbackQuery):
-    rows = await db.leaderboard("doodle_covert", 5) if db.ready else []
-    lines = [f"{i}. {r['display_name']} — {r['best_score']}" for i,r in enumerate(rows,1)] or ["No scores yet."]
-    await edit(q, msg.quote("Doodle Covert — Top 5\n\n" + "\n".join(lines)), kb.back_home())
+    await q.answer()
+    rows = []
+    database_error = False
+    if db.ready:
+        try:
+            rows = await db.leaderboard("doodle_covert", 5)
+        except Exception:
+            database_error = True
+            logging.exception("Could not load leaderboard from Supabase")
+    if rows:
+        lines = [f"{i}. {r['display_name']} — {r['best_score']}" for i,r in enumerate(rows,1)]
+    elif database_error:
+        lines = ["Rankings are temporarily unavailable.", "The game can still be played."]
+    else:
+        lines = ["No scores yet. Be the first agent on the board."]
+    await edit(q, msg.quote("Doodle Covert — Top 5\n\n" + "\n".join(lines)), kb.back_home(), acknowledge=False)
 @dp.callback_query(F.data == "menu:profile")
 async def profile(q: CallbackQuery): await edit(q, msg.quote(f"Agent Profile\n\n{q.from_user.full_name}\nTelegram ID: {q.from_user.id}"), kb.back_home())
 @dp.callback_query(F.data == "menu:feedback")
